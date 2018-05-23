@@ -1,0 +1,9 @@
+[package]
+name = "fractal"
+version = "0.1.0"
+authors = ["Jess 3Jane <me@jess.coffee>"]
+
+[dependencies]
+image = "0.19"
+num_cpus = "1.0"
+spmc = "0.2.2"
