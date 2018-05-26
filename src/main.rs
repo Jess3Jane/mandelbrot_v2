@@ -1,197 +1,15 @@
 extern crate image;
 extern crate num_cpus;
 extern crate spmc;
+extern crate fractal;
 
-use std::iter::Iterator;
 use std::path::Path;
 use std::thread;
 use image::ImageBuffer;
 use std::sync::{Arc, Mutex};
+use fractal::{RenderingContext, ColorScheme};
 
-#[derive(Clone, Copy)]
-struct RenderingContext {
-    x: f64,
-    y: f64,
-    scale: f64,
-    max_iter: u64,
-    x_px: u32,
-    y_px: u32,
-}
-
-impl RenderingContext {
-    fn enumerate_points(&self) -> ImageIterator {
-        let x_scale = self.scale;
-        let y_scale = self.scale * ((self.y_px as f64)/(self.x_px as f64));
-        let x_offset = self.x as f64 - x_scale/2.0;
-        let y_offset = self.y as f64 - y_scale/2.0;
-        ImageIterator{
-            x_scale, y_scale,
-            x_offset, y_offset,
-            cur_x: 0, cur_y: 0,
-            x_px: self.x_px, y_px: self.y_px,
-        }
-    }
-
-    fn enumerate_rows(&self) -> ImageRowIterator {
-        let x_scale = self.scale;
-        let y_scale = self.scale * ((self.y_px as f64)/(self.x_px as f64));
-        let x_offset = self.x as f64 - x_scale/2.0;
-        let y_offset = self.y as f64 - y_scale/2.0;
-        ImageRowIterator{
-            x_scale, y_scale,
-            x_offset, y_offset,
-            cur_y: 0,
-            x_px: self.x_px, y_px: self.y_px,
-        }
-    }
-}
-
-struct ImageIterator {
-    x_scale: f64,
-    y_scale: f64,
-    x_offset: f64,
-    y_offset: f64,
-    cur_x: u32,
-    cur_y: u32,
-    x_px: u32,
-    y_px: u32,
-}
-
-impl Iterator for ImageIterator {
-    type Item = (f64, f64, u32, u32);
-    fn next(&mut self) -> Option<(f64, f64, u32, u32)> {
-        if self.cur_x >= self.x_px { 
-            self.cur_x = 0;
-            self.cur_y += 1;
-            if self.cur_y >= self.y_px {
-                self.cur_y = 0;
-                return None
-            }
-        }
-
-        let ret = Some((self.x_scale*(self.cur_x as f64/self.x_px as f64) + self.x_offset,
-              self.y_scale*(self.cur_y as f64/self.y_px as f64) + self.y_offset,
-              self.cur_x, self.cur_y));
-        self.cur_x += 1;
-        ret
-    }
-}
-
-struct ImageRowIterator {
-    x_scale: f64,
-    y_scale: f64,
-    x_offset: f64,
-    y_offset: f64,
-    cur_y: u32,
-    x_px: u32,
-    y_px: u32,
-}
-
-impl Iterator for ImageRowIterator {
-    type Item = (ImageRowPixelIterator, u32);
-    fn next(&mut self) -> Option<(ImageRowPixelIterator, u32)> {
-        if self.cur_y >= self.y_px {
-            self.cur_y = 0;
-            return None
-        }
-
-        let ret = Some((ImageRowPixelIterator{ 
-            x_scale: self.x_scale,
-            x_offset: self.x_offset,
-            cur_x: 0,
-            x_px: self.x_px,
-            y_offset: self.y_scale*(self.cur_y as f64/self.y_px as f64) + self.y_offset,
-        }, self.cur_y));
-        self.cur_y += 1;
-        ret
-    }
-}
-
-struct ImageRowPixelIterator {
-    x_scale: f64,
-    x_offset: f64,
-    cur_x: u32,
-    x_px: u32,
-    y_offset: f64,
-}
-
-impl Iterator for ImageRowPixelIterator {
-    type Item = (f64, f64, u32);
-    fn next(&mut self) -> Option<(f64, f64, u32)> {
-        if self.cur_x >= self.x_px {
-            self.cur_x = 0;
-            return None
-        }
-
-        let ret = Some((
-                self.x_scale*(self.cur_x as f64/self.x_px as f64) + self.x_offset,
-                self.y_offset, self.cur_x
-            ));
-        self.cur_x += 1;
-        ret
-    }
-}
-
-struct ColorSchemeColor {
-    color: image::Rgb<u8>,
-    position: f64,
-}
-
-impl ColorSchemeColor {
-    fn from_hex(color: u32, position: f64) -> ColorSchemeColor {
-        let r = (color >> 16) as u8;
-        let g = (color >> 8) as u8;
-        let b = color as u8;
-        ColorSchemeColor {color: image::Rgb([r, g, b]), position}
-    }
-}
-
-struct ColorScheme {
-    colors: Vec<ColorSchemeColor>,
-}
-
-impl ColorScheme {
-    fn new() -> ColorScheme {
-        ColorScheme { colors: Vec::new() }
-    }
-
-    fn add_color(&mut self, color: ColorSchemeColor) {
-        let mut i = 0;
-        while i < self.colors.len() && self.colors[i].position < color.position { i += 1; }
-        self.colors.insert(i, color);
-    }
-
-    fn _lerp(a: u8, b: u8, f: f64) -> u8 {
-        (a as f64 * (1.0 - f) + b as f64 * f) as u8
-    }
-
-    fn lerp(a: &image::Rgb<u8>, b: &image::Rgb<u8>, f: f64) -> image::Rgb<u8> {
-        let r = ColorScheme::_lerp(a.data[0], b.data[0], f);
-        let g = ColorScheme::_lerp(a.data[1], b.data[1], f);
-        let b = ColorScheme::_lerp(a.data[2], b.data[2], f);
-        image::Rgb([r,g,b])
-    }
-
-    fn get_color(&self, pos: f64) -> image::Rgb<u8> {
-        let mut i = 0;
-        while i < self.colors.len() && self.colors[i].position < pos { i += 1; }
-        let a = &self.colors[i];
-        let b = if i == 0 { &self.colors[0] } else { &self.colors[i-1] };
-        ColorScheme::lerp(&a.color, &b.color, (pos - a.position) as f64/(b.position - a.position) as f64)
-    }
-}
-
-fn main() {
-    let mut cs = ColorScheme::new();
-    cs.add_color(ColorSchemeColor::from_hex(0x000000, 0.0));
-    cs.add_color(ColorSchemeColor::from_hex(0xbb2200, 0.8));
-    cs.add_color(ColorSchemeColor::from_hex(0xff7700, 1.0));
-
-    let ctx = RenderingContext { 
-        x: -1.7590170270659, y: 0.01916067191295, 
-        scale: 1.1e-12, max_iter: 20000, 
-        x_px: 1920, y_px: 1080,};
-
+fn render<F>(ctx: RenderingContext, cs: &ColorScheme, path: &Path, frac: F) where F: Fn(f64, f64, u64) -> u64 + Send + Sync + 'static{
     let mut iters : Vec<Arc<Mutex<Vec<u64>>>> = Vec::with_capacity(ctx.y_px as usize);
     for _ in 0..ctx.y_px {
         let mut row : Vec<u64> = Vec::with_capacity(ctx.x_px as usize);
@@ -210,11 +28,13 @@ fn main() {
     }
 
     println!("Calculating fractal");
-    let mut handles = Vec::new();
+    let mut handles = Vec::with_capacity(threads);
     let (tx, rx) = spmc::channel();
+    let rc = Arc::new(frac);
     for id in 0..threads {
         let rx = rx.clone();
         let mut histogram = histograms[id].clone();
+        let r = rc.clone();
         handles.push(thread::spawn(move || {
             let mut histogram = histogram.lock().unwrap();
             loop {
@@ -224,23 +44,8 @@ fn main() {
                         let row_arc : Arc<Mutex<Vec<u64>>> = row_arc;
                         let mut row_iter = row_arc.lock().unwrap();
                         for (x0, y0, x_px) in row {
-                            let mut x = 0.0;
-                            let mut y = 0.0;
-                            let mut iter = 0;
 
-                            while x*x + y*y < 4.0 && iter < ctx.max_iter {
-                                let xtemp = x*x - y*y + x0;
-                                let ytemp = 2.0*x*y + y0;
-
-                                if x == xtemp && y == ytemp {
-                                    iter = ctx.max_iter;
-                                    break;
-                                }
-
-                                x = xtemp;
-                                y = ytemp;
-                                iter += 1;
-                            }
+                            let iter = r(x0, y0, ctx.max_iter);
 
                             row_iter[x_px as usize] = iter;
                             if iter != ctx.max_iter { 
@@ -256,11 +61,11 @@ fn main() {
 
     for (row, y_px) in ctx.enumerate_rows() {
         let mut row_iter =  iters[y_px as usize].clone();
-        tx.send(Some((row, row_iter)));
+        tx.send(Some((row, row_iter))).unwrap();
     }
 
     for _ in 0..threads {
-        tx.send(None);
+        tx.send(None).unwrap();
     }
 
     for handle in handles {
@@ -292,5 +97,99 @@ fn main() {
     }
 
     println!("Saving");
-    image::ImageRgb8(img).save(Path::new("test.png")).unwrap();
+    image::ImageRgb8(img).save(path).unwrap();
+}
+
+fn main() {
+    let mut cs = ColorScheme::new();
+    cs.add_hex(0x000000, 0.0);
+    cs.add_hex(0xbb2200, 0.8);
+    cs.add_hex(0xff7700, 1.0);
+
+    //let mut cs = ColorScheme::new();
+	//cs.add_hex(0xfff7f3, 9.0/9.0);
+	//cs.add_hex(0xfde0dd, 8.0/9.0);
+	//cs.add_hex(0xfcc5c0, 7.0/9.0);
+	//cs.add_hex(0xfa9fb5, 6.0/9.0);
+	//cs.add_hex(0xf768a1, 5.0/9.0);
+	//cs.add_hex(0xdd3497, 4.0/9.0);
+	//cs.add_hex(0xae017e, 3.0/9.0);
+	//cs.add_hex(0x7a0177, 2.0/9.0);
+	//cs.add_hex(0x49006a, 1.0/9.0);
+	//cs.add_hex(0x000000, 0.0/9.0);
+
+    //let mut cs = ColorScheme::new();
+    //cs.add_hex(0xffffff, 1.0-0.0);
+    //cs.add_hex(0xffecb3, 1.0-0.2);
+    //cs.add_hex(0xe85285, 1.0-0.45);
+    //cs.add_hex(0x6a1b9a, 1.0-0.65);
+    //cs.add_hex(0x000000, 1.0-1.0);
+
+//    let ctx = RenderingContext { 
+//        x: 0.0, y: 0.0, 
+//        scale: 12.0, max_iter: 50, 
+//        x_px: 1920, y_px: 1080,};
+
+//    render(ctx, &cs, &Path::new("test.png"), |x0, y0, max_iter| {
+//            let mut x = 0.0;
+//            let mut y = 0.0;
+//            let mut iter = 0;
+//
+//            while x*x + y*y < 4.0 && iter < max_iter {
+//                let xtemp = x*x - y*y + x0;
+//                let ytemp = 2.0*x*y + y0;
+//
+//                if x == xtemp && y == ytemp {
+//                    iter = max_iter;
+//                    break;
+//                }
+//
+//                x = xtemp;
+//                y = ytemp;
+//                iter += 1;
+//            }
+//
+//            iter
+//        });
+
+//    render(ctx, &cs, &Path::new("test.png"), |x0, y0, max_iter| {
+//            let mut x = x0;
+//            let mut y = y0;
+//            let cx = 0.0;
+//            let cy = 0.90;
+//            let mut iter = 0;
+//
+//            while x*x + y*y < 4.0 && iter < max_iter {
+//                let xtemp = x*x - y*y;
+//                y = 2.0*x*y + cy;
+//                x = xtemp + cx;
+//                iter += 1;
+//            }
+//
+//            iter
+//        });
+
+
+    let ctx = RenderingContext { 
+        x: 0.0, y: 0.0, 
+        scale: 12.0, max_iter: 50, 
+        x_px: 1920, y_px: 1080,};
+
+    render(ctx, &cs, &Path::new("test.png"), |x0, y0, max_iter| {
+            let mut x = x0;
+            let mut y = y0;
+            let cx = 1.0;
+            let cy = 1.0;
+            let mut iter = 0;
+
+            while y.abs() < 50.0 && iter < max_iter {
+                let xtemp = x.sin()*y.cosh();
+                let ytemp = x.cos()*y.sinh();
+                x = cx*xtemp - cy*ytemp;
+                y = cx*ytemp + cy*xtemp;
+                iter += 1;
+            }
+
+            iter
+        });
 }
