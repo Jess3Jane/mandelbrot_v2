@@ -7,3 +7,4 @@ authors = ["Jess 3Jane <me@jess.coffee>"]
 image = "0.19"
 num_cpus = "1.0"
 spmc = "0.2.2"
+pbr = "1.0.1"
